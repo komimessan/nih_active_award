@@ -1,0 +1,897 @@
+---
+title: "Active Awards in Select NOFOs and RCDC Categories"
+subtitle: 'Feb 2025'
+author: 
+- Dolan Ghosh
+- Joy Wang
+- Komi Messan
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    code-line-numbers: true
+    code-tools: true
+    toc: true
+    toc-location: left
+    toc_float:
+      collapsed: true
+    grid: 
+      body-width: 100px
+      margin-width: 1000px
+    margin-top: 50px
+    css: styles.css
+editor: 
+  markdown: 
+    wrap: 72
+---
+
+# Overview
+
+-   Generate a list of **active awards** from **select NOFOs**. The
+    initial NOFO list provided by Dr. Mike Lauer was appended by
+    **NOFOs** from various sources. They will be updated periodically.
+-   Estimate funding for these awards in 2025 and out years.
+-   In addition to active awards, we also provide projects with other
+    appl_status_codes such as 'To be paid', Pending IRG Review, Pending
+    Council Review etc.
+
+```{r setup}
+#| include: false
+#| eval: true
+rm(list = ls())
+
+library(DBI)
+library(odbc)
+library(dbplyr)
+library(lubridate)
+library(kableExtra) # table styles
+library(DT) # table styles
+library(reactable) # table styles
+library(reactablefmtr) # for reactables
+library(tinytex) # For creation of pdf file output
+library(tidyverse) # data manipulation
+library(janitor) # data cleansing
+library(writexl)
+library(here) ## For path management
+
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+
+
+```
+
+# Pull data
+
+-   Include projects that are **active awards** as of the date the data
+    is pulled, from **select NOFOs** on Workforce Diversity.
+-   Excluded projects that are **active** but did not respond to a NOFO
+    or NOSI of interest. These projects may have had a diversity
+    supplement in the past but that supplement is no longer active.
+
+```{r}
+#| label: pull_data
+#| include: false
+#| eval: false
+
+
+rm(list = ls())
+# Connect to the database using the following:
+
+# nofo_list derived from original data sheet provided by ml where nofo numbers appear in proper format for data query.
+# variations ('Not-od-20-031', 'NOT-OD-20-031','Not-OD-20-031','NOT-OD-20-031; NOT-MD-19-001','NOT-OD-22-019','NOT-OD-24-169')
+# additiona NOFOs from Master file, etc. were added to the list
+
+con <- dbConnect(odbc::odbc(), "CONNPRDIRDB", UID = Sys.getenv("userid"), PWD = Sys.getenv("pwd"))
+
+# Pull NOFO NOSI data-----------------------------
+
+dat_active_awd <- dbGetQuery(con, "
+select 
+sysdate as download_date, 
+a.fy,                   
+a.admin_phs_org_code, 
+a.major_activity_code,
+a.activity_code,
+a.grant_num,
+a.subproject_id,
+a.appl_id,
+a.appl_status_code,
+st.appl_status_descrip,
+a.appl_type_code,
+a.rfa_pa_number,
+rfa.notice_title,
+a.agency_routing_num,
+a.project_period_start_date,
+a.project_period_end_date,
+apt.fy as apt_fy,
+apt.total_oblgtd_amt,
+apt.total_period_amt,
+apt.appl_period_num,
+apt.period_type_code,
+apt.appl_period_start_date,
+apt.appl_period_end_date,
+case when pers.profile_person_id is null then pit.person_id else pers.profile_person_id end as profile_person_id,
+initcap(pers.last_name||', '||pers.first_name||' '||pers.mi_name) as pi_name,
+pit.role_type_code
+from appls_t a
+LEFT JOIN appl_periods_t apt on apt.appl_id = a.appl_id
+LEFT JOIN appl_statuses_t st on st.appl_status_code = a.appl_status_code
+LEFT JOIN rfa_pa_notices_t rfa on rfa.rfa_pa_number = a.rfa_pa_number,
+phs_orgs_t phs,
+person_involvements_t pit,
+persons_t pers
+--ghoshd_db.dat_nofo_list_20250211 rfa_dg
+where a.appl_id = pit.appl_id 
+and a.admin_phs_org_code = phs.phs_org_code
+and pit.person_id = pers.person_id
+--and (a.rfa_pa_number = rfa_dg.rfa_pa_number_clean or UPPER(a.agency_routing_num) = rfa_dg.rfa_pa_number_clean)
+and phs.icd_dhhs_code = '1'
+and pit.role_type_code in ('PI','MPI')
+and pit.version_code = 'A'
+and a.project_period_end_date >= sysdate
+and apt.fy >= 2025
+and apt.period_type_code in ('REQ', 'BUD', 'COM')
+order by a.grant_num, apt_fy") %>%
+  select(unique(colnames(.))) %>%
+  clean_names()
+
+## Pull Dolan clean 
+dat_nofo_list_20250211 <- dbGetQuery(con,"select * from  ghoshd_db.dat_nofo_list_20250211") %>% 
+  clean_names() 
+
+
+# Pull RCDC data-----------------------------------------
+
+dat_rcdc_wf <- dbGetQuery(con, "with t1 as
+(
+select 
+adc.categorized_fy, 
+dc.dc_name, 
+adc.appl_id
+from 
+appl_disease_categories_t adc, 
+disease_categories_t dc
+where adc.dc_id = dc.dc_id
+--and adc.categorized_fy >= 2025 ## Donm't want to limit by when categorization was done and cut out budget
+--and dc.dc_assigned_fy >= 2025
+and dc.dc_name = 'Workforce Diversity and Outreach'
+),
+t2 as
+(
+select 
+sysdate as download_date, 
+a.fy,                   
+a.admin_phs_org_code, 
+a.major_activity_code,
+a.activity_code,
+a.grant_num,
+a.subproject_id,
+a.appl_id,
+a.appl_status_code,
+st.appl_status_descrip,
+a.appl_type_code,
+a.rfa_pa_number,
+rfa.notice_title,
+a.agency_routing_num,
+a.project_period_start_date,
+a.project_period_end_date,
+apt.fy as apt_fy,
+apt.total_oblgtd_amt,
+apt.total_period_amt,
+apt.appl_period_num,
+apt.period_type_code,
+apt.appl_period_start_date,
+apt.appl_period_end_date,
+case when pers.profile_person_id is null then pit.person_id else pers.profile_person_id end as profile_person_id,
+initcap(pers.last_name||', '||pers.first_name||' '||pers.mi_name) as pi_name,
+pit.role_type_code
+from appls_t a
+LEFT JOIN appl_periods_t apt on apt.appl_id = a.appl_id
+LEFT JOIN appl_statuses_t st on st.appl_status_code = a.appl_status_code
+LEFT JOIN rfa_pa_notices_t rfa on rfa.rfa_pa_number = a.rfa_pa_number,
+phs_orgs_t phs,
+person_involvements_t pit,
+persons_t pers
+where a.appl_id = pit.appl_id 
+and a.admin_phs_org_code = phs.phs_org_code
+and pit.person_id = pers.person_id
+and phs.icd_dhhs_code = '1'
+and pit.role_type_code in ('PI','MPI')
+and pit.version_code = 'A'
+and a.project_period_end_date >= sysdate
+--and a.fy >= 2025 -- Budget could be from previous year so we don't want to limit 
+and a.appl_status_code <> 70
+and apt.fy >= 2025
+and apt.period_type_code in ('REQ', 'BUD', 'COM')
+and total_period_amt > 0
+and a.appl_status_code not in ('01', '02', '25', '30', '70')
+order by a.grant_num, apt_fy
+)
+select t1.*,
+t2.*
+from t1, t2
+where t1.appl_id = t2.appl_id") %>% 
+  select(unique(colnames(.))) %>%
+  clean_names() 
+
+
+write_csv(dat_active_awd, path = here::here("data_files", "dat_active_awd.csv"))
+write_csv(dat_nofo_list_20250211, path = here::here("data_files", "dat_nofo_list_20250211.csv"))
+write_csv(dat_rcdc_wf, path = here::here("data_files", "dat_rcdc_wf.csv"))
+
+```
+
+# NOFO, NOSI Project data
+
+-   Derive `project_code_dc`, which is the `grant_stem`.
+-   Derive budgeted (BUD) and committed (COM) years funding for each
+    awarded `grant_num`. The requested (REQ) values were ignored for
+    funded projects.
+-   Derive requested (REQ) years funding for each unfunded `grant_num`.
+-   Excluded projects where `total_period_amt` values were null. Can
+    discuss if we should display these projects. These are WIP projects
+    with W suffix code.
+-   Excluded projects with the following `appl_status_codes`
+    -   01, Administratively Withdrawn by IC
+    -   02, Withdrawn
+    -   25, Not discussed
+    -   30, Withdrawn by IC - Other Version Encumbered
+    -   70, Application has been entered into computer
+-   Funded projects have 'BUD' and 'COM' amounts. For these projects, we
+    are excluding the REQ amount.
+-   Unfunded projects only have REQ amounts.
+-   Some projects have been partially funded in FY2025. For example
+    3R01AI177624-01A1S1 (appl_id:11170264), 19,201 has been paid but
+    there is \$57,607 more committed for FY2025. For these projects the
+    FY2025 appears split with BUD and COM dollars. The
+    [NoA](https://apps.era.nih.gov/qvr/web/dd_snapshot.cfm?ApplId=11170264&source_code_dc=CURRENT&appllinks=y)
+    mentions "This award provides support under the Research Supplements
+    to Promote Diversity in Health-Related Research Program for Addison
+    Hill/East Tennessee State University beginning 11/01/2024 in the
+    amount of \$19,201 Total Costs. The amount of this supplement has
+    been prorated for the -01 year, providing 4 months support, to
+    coincide with the budget period of the parent grant. These funds are
+    restricted for the above purpose only and may not be transferred to
+    any other individual. Future year's supplemental funds \$57,607 in
+    Year 2, \$57,861 in Year 3, \$57,988 in Year 4, and \$38,658 in Year
+    5 in Total Costs; are also restricted." In this case the \$57,607 in
+    Year 2 is still 'slotted' for FY2025. but it shows up for Yr2 in my
+    data set.
+
+## Data Processing
+
+-   Standardize project identifiers and remove null values.
+-   Filter out terminated projects based on specific criteria.
+-   Remove "REQ" records if both "BUD" and "COM" exist in the same fiscal year.
+
+
+```{r}
+#| label: data_process
+#| include: true
+#| eval: true
+#| collapse: true
+
+
+# Load data
+dat_active_awd <- read_csv(here::here("data_files", "dat_active_awd.csv"))
+dat_nofo_list_20250211 <- read_csv(here::here("data_files", "dat_nofo_list_20250211.csv"))
+#dat_rcdc_wf <- read_csv(here::here("data_files", "dat_rcdc_wf.csv"))
+
+
+
+## Join the NOFOs list to the activa award data
+dat_active_awd_long <- dat_active_awd %>%
+  pivot_longer(cols = c(rfa_pa_number, agency_routing_num), names_to = "key", values_to = "rfa_pa_number_clean")
+
+dat_active_awd_all <- dat_nofo_list_20250211 %>% left_join(dat_active_awd_long, by = "rfa_pa_number_clean")
+
+
+# ###################################### Checks with Joy/Dolan Data -------------
+# ch_joy_amt <- dat_active_awd_all %>%
+#   filter(appl_status_code %in% c("05","06")) %>% 
+#   filter(period_type_code == "COM") %>%
+#   filter(total_period_amt > 0) %>% 
+#   #select(apt_fy, appl_id, appl_status_code, total_period_amt, period_type_code) %>%
+#   distinct(apt_fy, appl_id, appl_status_code, .keep_all = TRUE) %>%
+#   group_by(apt_fy, appl_status_code) %>%
+#   summarise(total_committed_amt = sum(total_period_amt, na.rm = TRUE)) %>%
+#   arrange(apt_fy, appl_status_code) ## 100% match with Joy
+# 
+# 
+# ch_joy_app <- dat_active_awd_all %>%
+#   filter(total_period_amt > 0) %>%
+#   filter(!appl_status_code %in% c("01","02", "25", "30", "70")) %>%
+#   group_by(appl_status_code) %>%
+#   summarise(app_count = n_distinct(appl_id)) %>%
+#   arrange(appl_status_code) ## 100% match with Joy
+# 
+# ############################ End of checking ---------------------------
+# 
+
+# ########################## Writing to a schema
+# #
+# nofo_list_dg_use <- read_csv(here("data_files","dat_nofo_list_20250211.csv")) %>% clean_names()
+# 
+# nofo_list_dg_use <- nofo_list_dg_use %>%
+#   group_by(rfa_pa_number) %>% 
+#   summarise(
+#     date_provided = paste(unique(date_provided), collapse = "; "),
+#     notes = paste(unique(notes), collapse = "; "),
+#     source = paste(unique(source), collapse = "; "),
+#     .groups = "drop"  # Ensures the output is not grouped
+#   ) %>% 
+#   ungroup() %>% 
+#   mutate(terminated_flag = case_when(grepl('Unpublished|First round', notes, ignore.case = TRUE) ~ "Y", TRUE ~"N")) %>% 
+#   distinct() %>% 
+#   select(date_provided, rfa_pa_number, everything())
+# 
+# ch_termination_status <- nofo_list_dg_use %>%
+#   group_by(terminated_flag) %>% summarize(count_nofos = n_distinct(rfa_pa_number))
+# ## Write dg nofos to a schema
+# names(nofo_list_dg_use) <- toupper(names(nofo_list_dg_use)) # capitalize the name to avoid error
+# 
+# field_types <- c(DATE_PROVIDED = "VARCHAR2(50)",
+#                  RFA_PA_NUMBER = "VARCHAR2(50)",
+#                  NOTES = "VARCHAR2(600)",
+#                  SOURCE = "VARCHAR2(500)",
+#                  TERMINATION_FLAG = "VARCHAR2(500)")
+# 
+# # Delete previously saved data under the same name
+# del_nofo_list_dg_use <- dbGetQuery(con, "DROP TABLE MESSANKS_DB.nofo_list_dg_use")
+# 
+# # write the data to my schema
+# dbWriteTable(con, name = SQL("NOFO_LIST_DG_USE"),
+#              value = nofo_list_dg_use , overwrite=T,
+#              row.names=F, ora.number = FALSE, field.types = field_types)
+# #
+# 
+# ############################ END of writing to a schema ----------------------
+
+
+
+dat_active_awd_use  <- dat_active_awd_all %>%
+  mutate(project_code_dc = str_sub(grant_num, 1, 11),
+         grant_num = case_when(!is.na(subproject_id) ~ paste0(grant_num, "-", subproject_id), TRUE ~ grant_num)) %>%
+  filter(total_period_amt > 0) %>%
+  filter(!appl_status_code %in% c("01", "02", "25", "30", "70")) %>%
+  group_by(apt_fy, appl_id) %>% 
+  mutate(has_Y_term = any(terminated == "Y"), 
+         has_N_term = any(terminated == "N")) %>% 
+  ungroup() %>%
+  filter(!(terminated == "N" & has_Y_term & has_N_term)) %>% 
+  arrange(grant_num, appl_period_num)
+
+  
+
+###### Filter out the "REQ" rows only if the same appl_id has both "BUD" 
+###### (in apt_fy <= 2025) and "COM" in the same apt_fy as "REQ"
+
+###  Take 3 step to filter the data as follow:
+# Step 1: Creates a new column (has_BUD) that checks if an appl_id has a "BUD" record for any apt_fy ≤ 2025.
+# Step 2: Creates has_COM and has_REQ flags to check if appl_id has both "REQ" and "COM" in the same apt_fy.
+# Step 3: Uses filter() to remove "REQ" rows only if:
+#   - The appl_id has a "BUD" record at any point (apt_fy ≤ 2025).
+#   - The same appl_id has both "REQ" and "COM" in the same apt_fy.
+
+
+  dat_active_awd_use_filtered <- dat_active_awd_use %>%
+    group_by(appl_id) %>% 
+    mutate(has_BUD = any(period_type_code == "BUD" & apt_fy <= 2025)) %>% 
+    ungroup() %>% 
+    group_by(apt_fy, appl_id) %>%
+    mutate(has_COM = any(period_type_code == "COM"), 
+           has_REQ = any(period_type_code == "REQ")) %>%
+    ungroup() %>%
+    filter(!((period_type_code == "REQ" & has_REQ & has_COM) | (period_type_code == "REQ" & has_REQ & has_BUD)))
+  
+
+```
+
+
+## Summary Data On Selected NOFOs
+
+-   Aggregate active award data to summarize funding and application outcomes.
+-   Categorize applications by fiscal year and termination status.
+-   Generate a summary table displaying application counts and funding amounts.
+
+
+```{r}
+#| label: data_summary
+#| include: true
+#| eval: true
+#| collapse: true
+
+
+## Summarize the entire data by project and terminated status
+
+data_long <- dat_active_awd_use_filtered %>%
+  group_by(rfa_pa_number_clean, grant_num, appl_id, appl_status_code, appl_status_descrip, terminated, apt_fy, period_type_code) %>%
+  summarise(funded_amount = sum(total_period_amt, na.rm = TRUE), .groups = "drop") %>% 
+  arrange(grant_num, appl_id, apt_fy, period_type_code) %>% 
+  mutate(appl_status_code =  case_when(period_type_code != "BUD"~"", TRUE~ appl_status_code),
+         appl_outcome =  case_when(period_type_code == "COM" ~ "Committed",
+                                          period_type_code == "REQ" ~ "Requested", 
+                                          TRUE~ sub("\\..*", "", appl_status_descrip)),
+         appl_status_descrip = case_when((appl_status_code %in% c("05","06","35")) ~ appl_status_descrip, TRUE~"")
+         ) %>% 
+  select(apt_fy, rfa_pa_number_clean, grant_num, appl_id, appl_status_code, appl_status_descrip,
+                  appl_outcome, terminated, funded_amount)
+
+## Summarize the table
+tab01_summary_nofos <- data_long %>% 
+  #group_by(apt_fy, appl_status_descrip, terminated, appl_status_code) %>% 
+  group_by(apt_fy, appl_status_code, appl_outcome, terminated) %>% 
+  summarise(app_count = prettyNum(n_distinct(appl_id), big.mark = ","),
+            funded_amount = prettyNum(sum(funded_amount, na.rm = TRUE), big.mark = ","),
+            appl_status_descrip = first(appl_status_descrip)) %>% 
+  select(apt_fy, appl_status_code, appl_status_descrip, appl_outcome, terminated, app_count, funded_amount)
+  
+  
+
+## Table summary by Fiscal Year and Application Outcome
+
+reactable(tab01_summary_nofos, 
+   columns = list(
+     apt_fy = colDef(name ="Fiscal Year", filterable = TRUE, width = 80),
+     appl_status_code = colDef(name = "Application Status Code", filterable = TRUE, width = 100),
+     appl_status_descrip = colDef(name ="Status Description", filterable = TRUE, width = 180),
+     appl_outcome = colDef(name = "Application Outcome", filterable = TRUE, width = 100),
+     terminated = colDef(name = "Terminated Status", filterable = TRUE, width = 100),
+     app_count = colDef(name = "Application Count", filterable = TRUE, width = 100),
+     funded_amount = colDef(name = "Funding Amount", filterable = TRUE, width = 100)
+     ),
+   defaultColDef = colDef(
+    header = function(value) gsub(".*?([0-9]+).*", "\\1", value, fixed = TRUE),
+    align = "center",
+    minWidth = 70,
+    headerStyle = list(background = "#f7f7f8"),
+    width = 100
+  ),
+  bordered = FALSE, highlight = TRUE, filterable = FALSE, minRows = 10, 
+  resizable = TRUE, wrap = TRUE, compact = TRUE, showPageSizeOptions = TRUE,
+  style = list(fontFamily = "Cambria", fontSize = "12px")
+          ) %>% 
+  add_title(title = "Table 1: Summary Table of Active Projects for Select NOFOs.", font_size = 14, font_weight = "normal", font_style = "italic")
+
+# save data for later
+write_csv(tab01_summary_nofos, here::here("output", "tab01_summary_nofos.csv"))
+
+```
+
+
+## Data BY Status and Outcome
+
+-   Breakdown of active awards based on NOFOs and funding status.
+-   Convert data into a structured format for better analysis.
+-   Organize funding data by fiscal year and application outcome.
+
+```{r}
+#| label: data_project_nosi
+#| include: true
+#| eval: true
+#| collapse: true
+# 
+# 
+# ## Convert the table into a long format
+# dat_active_awd_use_long <- dat_active_awd_use_filtered %>% 
+#   select(apt_fy, rfa_pa_number_clean, grant_num, appl_id, appl_status_code, appl_status_descrip, appl_period_num,terminated, period_type_code, total_period_amt) %>% 
+#   distinct() %>%
+# #   arrange(grant_num, appl_id, apt_fy) %>% 
+# #   group_by(grant_num, apt_fy) %>% 
+# #   mutate(fy_seq = seq_along(apt_fy),
+# #          apt_fy_period_type = paste0("FY", apt_fy, "-", period_type_code)) %>% 
+# #   ungroup() %>% 
+# #   arrange(grant_num, apt_fy)
+# 
+# ## From long format to wide format
+# 
+# dat_active_awd_use_wide <- dat_active_awd_use_long %>%  
+#   select(rfa_pa_number_clean, grant_num, appl_id, terminated, apt_fy_period_type, total_period_amt) %>%
+#   distinct() %>% 
+#   pivot_wider(names_from = apt_fy_period_type, values_from = total_period_amt) %>%
+#   mutate_all(funs(replace_na(.,0))) %>%
+#   select(rfa_pa_number_clean, grant_num, appl_id, terminated,
+#          "FY2025-BUD",
+#          "FY2026-BUD",
+#          "FY2025-COM",
+#          "FY2026-COM",
+#          "FY2027-COM",
+#          "FY2028-COM",
+#          "FY2029-COM",
+#          "FY2025-REQ",
+#          "FY2026-REQ",
+#          "FY2027-REQ",
+#          "FY2028-REQ",
+#          "FY2029-REQ",
+#          "FY2030-REQ",
+#          "FY2031-REQ",
+#          "FY2032-REQ",
+#          "FY2033-REQ"
+#          )
+# 
+#   
+
+# ## Check Dolan summary table
+# ch_dg <- dat_active_awd_use_long %>% 
+#   filter(terminated ==  "Y") %>% 
+#   group_by(apt_fy_period_type) %>% 
+#   summarise(count = n_distinct(appl_id),
+#             funding = sum(total_period_amt, na.rm = TRUE))
+
+tab02_status_outcome <- data_long %>% 
+  mutate(funded_amount = prettyNum(funded_amount, big.mark = ",")) %>%
+  arrange(rfa_pa_number_clean, grant_num, appl_id, apt_fy)
+  
+  
+## Table summary by Fiscal Year and Application Outcome
+
+reactable(tab02_status_outcome, 
+   columns = list(
+     apt_fy = colDef(name ="Fiscal Year", filterable = TRUE, width = 80),
+     rfa_pa_number_clean = colDef(name = "NOFOs Number", filterable = TRUE, width = 80),
+     grant_num = colDef(name = "Grant Number", filterable = TRUE, width = 150),
+     appl_id = colDef(name = "Application ID", filterable = TRUE, width = 80),
+     appl_status_code = colDef(name = "Application Status Code", filterable = TRUE, width = 100),
+     appl_status_descrip = colDef(name ="Status Description", filterable = TRUE, width = 180),
+     appl_outcome = colDef(name = "Application Outcome", filterable = TRUE, width = 100),
+     terminated = colDef(name = "Terminated Status", filterable = TRUE, width = 100),
+     awarded_amount = colDef(name = "Funding Amount", filterable = TRUE, width = 100)
+     ),
+   defaultColDef = colDef(
+    header = function(value) gsub(".*?([0-9]+).*", "\\1", value, fixed = TRUE),
+    align = "center",
+    minWidth = 70,
+    headerStyle = list(background = "#f7f7f8"),
+    width = 100
+  ),
+  bordered = FALSE, highlight = TRUE, filterable = FALSE, minRows = 10, 
+  resizable = TRUE, wrap = TRUE, compact = TRUE, showPageSizeOptions = TRUE,
+  style = list(fontFamily = "Cambria", fontSize = "12px")
+          ) %>% 
+  add_title(title = "Table 2: Active Projects for Select NOFO NOSI By NOFOs and Project Number.", font_size = 14, font_weight = "normal", font_style = "italic")
+
+
+write_csv(tab02_status_outcome, here::here("output", "tab02_status_outcome.csv"))
+
+
+```
+
+
+## Summary Data By NOFO
+
+-   Summarize funding and application counts by NOFO.
+-   Provide an overview of funding allocations and project distributions by NOFOs.
+-   Display results in an interactive table.
+
+```{r}
+#| label: table03_nofos
+#| include: true
+#| eval: true
+#| collapse: true
+
+
+
+tab03_by_nofos <- data_long %>% 
+  group_by(apt_fy, rfa_pa_number_clean, terminated) %>% 
+  summarise(app_count = n_distinct(appl_id),
+            funded_amount = prettyNum(sum(funded_amount, na.rm = TRUE), big.mark = ",")) %>% 
+  arrange(rfa_pa_number_clean, apt_fy, terminated)
+
+
+
+## Table by NOFOs
+htmltools::div(
+  style = "display: flex; flex-direction: column; align-items: center;s",
+  
+reactable(tab03_by_nofos, 
+   columns = list(
+     apt_fy = colDef(name ="Fiscal Year", filterable = TRUE, width = 80),
+     rfa_pa_number_clean = colDef(name = "NOFOs Number", filterable = TRUE, width = 100),
+     terminated = colDef(name = "Terminated Status", filterable = TRUE, width = 100),
+     app_count = colDef(name = "Application Count", filterable = TRUE, width = 100),
+     funded_amount = colDef(name = "Funding Amount", filterable = TRUE, width = 100)
+     ),
+   defaultColDef = colDef(
+    header = function(value) gsub(".*?([0-9]+).*", "\\1", value, fixed = TRUE),
+    align = "center",
+    minWidth = 70,
+    headerStyle = list(background = "#f7f7f8"),
+    width = 100
+  ),
+  bordered = FALSE, highlight = TRUE, filterable = FALSE, minRows = 10, 
+  resizable = TRUE, wrap = TRUE, compact = TRUE, showPageSizeOptions = TRUE,
+  style = list(fontFamily = "Cambria", fontSize = "12px")
+          ) %>% 
+  add_title(title = "Table 3: Summary Table of Active Projects By NOFOs.", font_size = 14, font_weight = "normal", font_style = "italic")
+)
+
+# Save data
+write_csv(tab03_by_nofos, here::here("output", "tab03_by_nofos.csv"))
+
+
+```
+
+
+# RCDC Project Data
+
+
+
+## Data Processing
+
+This section handles the preparation and filtering of the RCDC workforce data as follow: 
+-   Transformations of the raw RCDC data to create necessary variables.
+-   Filter data according to specific conditions.
+
+
+```{r}
+#| label: rcdc_data_processing
+#| include: true
+#| eval: true
+#| collapse: true
+
+dat_rcdc_wf <- read_csv(here::here("data_files", "dat_rcdc_wf.csv"))
+
+
+## Data Processing
+dat_rcdc_wf_use  <- dat_rcdc_wf %>%
+  mutate(project_code_dc = str_sub(grant_num, 1, 11),
+         grant_num = case_when(!is.na(subproject_id) ~ paste0(grant_num, "-", subproject_id),
+                               TRUE ~ grant_num)) %>%
+  filter(total_period_amt > 0) %>%
+  filter(!appl_status_code %in% c("01", "02", "25", "30", "70")) %>%
+  arrange(grant_num, appl_period_num)
+
+
+###### Filter out the "REQ" rows only if the same appl_id has both "BUD" 
+###### (in apt_fy <= 2025) and "COM" in the same apt_fy as "REQ"
+
+###  Take 3 step to filter the data as follow:
+# Step 1: Creates a new column (has_BUD) that checks if an appl_id has a "BUD" record for any apt_fy ≤ 2025.
+# Step 2: Creates has_COM and has_REQ flags to check if appl_id has both "REQ" and "COM" in the same apt_fy.
+# Step 3: Uses filter() to remove "REQ" rows only if:
+#   - The appl_id has a "BUD" record at any point (apt_fy ≤ 2025).
+#   - The same appl_id has both "REQ" and "COM" in the same apt_fy.
+
+
+  dat_rcdc_wf_use_filtered <- dat_rcdc_wf_use %>%
+    group_by(appl_id) %>% 
+    mutate(has_BUD = any(period_type_code == "BUD" & apt_fy <= 2025)) %>% 
+    ungroup() %>% 
+    group_by(apt_fy, appl_id) %>%
+    mutate(has_COM = any(period_type_code == "COM"), 
+           has_REQ = any(period_type_code == "REQ")) %>%
+    ungroup() %>%
+    filter(!((period_type_code == "REQ" & has_REQ & has_COM) | (period_type_code == "REQ" & has_REQ & has_BUD)))
+
+
+```
+
+
+
+     
+## Summary RCDC Worforce Diversity Category By Outcome
+
+
+This section summarizes the RCDC data by project outcome, including funded amounts and the application status. It provides an overview of active projects within the RCDC categories.
+
+```{r}
+#| label: data_summary_rcdc
+#| include: true
+#| eval: true
+#| collapse: true  
+  
+
+
+## Summarize the entire rcdc data by project
+
+data_long_rcdc <- dat_rcdc_wf_use_filtered %>%
+  group_by(rfa_pa_number, grant_num, appl_id, appl_status_code, appl_status_descrip, apt_fy, period_type_code) %>%
+  summarise(
+    category_name = first(dc_name),
+    funded_amount = sum(total_period_amt, na.rm = TRUE), .groups = "drop") %>% 
+  arrange(grant_num, appl_id, apt_fy, period_type_code) %>% 
+  mutate(appl_status_code =  case_when(period_type_code != "BUD"~"", TRUE~ appl_status_code),
+         appl_outcome =  case_when(period_type_code == "COM" ~ "Committed",
+                                          period_type_code == "REQ" ~ "Requested", 
+                                          TRUE~ sub("\\..*", "", appl_status_descrip)),
+         appl_status_descrip = case_when((appl_status_code %in% c("05","06","35")) ~ appl_status_descrip, TRUE~"")
+         ) %>% 
+  select(category_name, apt_fy, rfa_pa_number, grant_num, appl_id, appl_status_code, appl_status_descrip,
+                  appl_outcome, funded_amount)
+
+
+## Summarize the rcdc table
+tab04_rcdc_summary <- data_long_rcdc %>% 
+  group_by(apt_fy, appl_status_code, appl_outcome) %>% 
+  summarise(category_name = first(category_name), 
+            app_count = prettyNum(n_distinct(appl_id), big.mark = ","),
+            funded_amount = prettyNum(sum(funded_amount, na.rm = TRUE), big.mark = ","),
+            appl_status_descrip = first(appl_status_descrip)) %>% 
+  select(category_name, apt_fy, appl_status_code, appl_status_descrip, appl_outcome, app_count, funded_amount)
+  
+  
+
+## Table
+reactable(tab04_rcdc_summary, 
+   columns = list(
+     category_name = colDef(name = "Category Name", filterable = TRUE, width = 200),
+     apt_fy = colDef(name ="Fiscal Year", filterable = TRUE, width = 80),
+     appl_status_code = colDef(name = "Application Status Code", filterable = TRUE, width = 100),
+     appl_status_descrip = colDef(name ="Status Description", filterable = TRUE, width = 180),
+     appl_outcome = colDef(name = "Application Outcome", filterable = TRUE, width = 100),
+     app_count = colDef(name = "Application Count", filterable = TRUE, width = 100),
+     funded_amount = colDef(name = "Funding Amount", filterable = TRUE, width = 100)
+     ),
+   defaultColDef = colDef(
+    header = function(value) gsub(".*?([0-9]+).*", "\\1", value, fixed = TRUE),
+    align = "center",
+    minWidth = 70,
+    headerStyle = list(background = "#f7f7f8"),
+    width = 100
+  ),
+  bordered = FALSE, highlight = TRUE, filterable = FALSE, minRows = 10, 
+  resizable = TRUE, wrap = TRUE, compact = TRUE, showPageSizeOptions = TRUE,
+  style = list(fontFamily = "Cambria", fontSize = "12px")
+          ) %>% 
+  add_title(title = "Table 4: Summary Table of Active Projects for RCDC category.", font_size = 14, font_weight = "normal", font_style = "italic")
+
+write_csv(tab04_rcdc_summary, here::here("output", "tab04_rcdc_summary.csv"))
+
+```
+
+
+
+
+
+## RCDC Worforce Diversity Category By Status and Outcome
+
+This section generates a table based on the status and outcome of projects, providing details of funded amounts and application outcomes categorized by status.
+
+```{r}
+#| label: rcdc_data_status_outcome
+#| include: true
+#| eval: true
+#| collapse: true
+
+
+## Compute the table
+tab05_rcdc_status_outcome <- data_long_rcdc %>% 
+  mutate(funded_amount = prettyNum(funded_amount, big.mark = ",")) %>%
+  arrange(rfa_pa_number, grant_num, appl_id, apt_fy)
+
+## Table
+
+reactable(tab05_rcdc_status_outcome, 
+   columns = list(
+     category_name = colDef(name = "Category Name", filterable = TRUE, width = 200),
+     apt_fy = colDef(name ="Fiscal Year", filterable = TRUE, width = 80),
+     rfa_pa_number = colDef(name = "NOFOs Number", filterable = TRUE, width = 80),
+     grant_num = colDef(name = "Grant Number", filterable = TRUE, width = 150),
+     appl_id = colDef(name = "Application ID", filterable = TRUE, width = 100),
+     appl_status_code = colDef(name = "Application Status Code", filterable = TRUE, width = 100),
+     appl_status_descrip = colDef(name ="Status Description", filterable = TRUE, width = 180),
+     appl_outcome = colDef(name = "Application Outcome", filterable = TRUE, width = 100),
+     app_count = colDef(name = "Application Count", filterable = TRUE, width = 100),
+     funded_amount = colDef(name = "Funding Amount", filterable = TRUE, width = 100)
+     ),
+   defaultColDef = colDef(
+    header = function(value) gsub(".*?([0-9]+).*", "\\1", value, fixed = TRUE),
+    align = "center",
+    minWidth = 70,
+    headerStyle = list(background = "#f7f7f8"),
+    width = 100
+  ),
+  bordered = FALSE, highlight = TRUE, filterable = FALSE, minRows = 10, 
+  resizable = TRUE, wrap = TRUE, compact = TRUE, showPageSizeOptions = TRUE,
+  style = list(fontFamily = "Cambria", fontSize = "12px")
+          ) %>% 
+  add_title(title = "Table 5: Active Projects for RCDC Category.", font_size = 14, font_weight = "normal", font_style = "italic")
+
+write_csv(tab05_rcdc_status_outcome, here::here("output", "tab05_rcdc_status_outcome.csv"))
+
+```
+
+
+
+## RCDC Summary Data By NOFO
+
+This section summarizes the data by NOFO (Notice of Funding Opportunity) and generates a table with the application count and funding amount per NOFO, categorized by fiscal year.
+
+
+```{r}
+#| label: table06_rcdc_nofos
+#| include: true
+#| eval: true
+#| collapse: true
+
+
+tab06_rcdc_by_nofos <- data_long_rcdc %>% 
+  group_by(apt_fy, rfa_pa_number) %>% 
+  summarise(category_name = first(category_name),
+            app_count = n_distinct(appl_id),
+            funded_amount = prettyNum(sum(funded_amount, na.rm = TRUE), big.mark = ",")) %>% 
+  arrange(rfa_pa_number, apt_fy) %>% 
+  select(category_name, apt_fy, rfa_pa_number, app_count, funded_amount)
+
+
+
+## Table by NOFOs
+htmltools::div(
+  style = "display: flex; flex-direction: column; align-items: center;",
+  
+reactable(tab06_rcdc_by_nofos, 
+   columns = list(
+     category_name = colDef(name = "Category Name", filterable = TRUE, width = 200),
+     apt_fy = colDef(name ="Fiscal Year", filterable = TRUE, width = 80),
+     rfa_pa_number = colDef(name = "NOFOs Number", filterable = TRUE, width = 100),
+     app_count = colDef(name = "Application Count", filterable = TRUE, width = 100),
+     funded_amount = colDef(name = "Funding Amount", filterable = TRUE, width = 100)
+     ),
+   defaultColDef = colDef(
+    header = function(value) gsub(".*?([0-9]+).*", "\\1", value, fixed = TRUE),
+    align = "center",
+    minWidth = 70,
+    headerStyle = list(background = "#f7f7f8"),
+    width = 100
+  ),
+  bordered = FALSE, highlight = TRUE, filterable = FALSE, minRows = 10, 
+  resizable = TRUE, wrap = TRUE, compact = TRUE, showPageSizeOptions = TRUE,
+  style = list(fontFamily = "Cambria", fontSize = "12px")
+          ) %>% 
+  add_title(title = "Table 6: Summary Table of RCDC Category By NOFOs.", font_size = 14, font_weight = "normal", font_style = "italic")
+)
+
+
+# Save data
+write_csv(tab06_rcdc_by_nofos, here::here("output", "tab06_rcdc_by_nofos.csv"))
+
+
+```
+
+
+
+# Final Remarks
+
+```{r nofo_list}
+#| label: final_remark
+#| include: true
+#| eval: true
+
+
+#dat_nofo_list <- read_csv(here::here("data_files", "nofo_list_dg_use.csv"))
+
+count_distinct_nofo <- n_distinct(dat_active_awd_all$rfa_pa_number_clean)
+
+count_terminated_nofo <- n_distinct(dat_active_awd_all$rfa_pa_number_clean[dat_active_awd_all$terminated == "Y"])
+# 
+# count_common_nofo <- dat_active_awd_all %>%
+#   filter(rfa_pa_number_clean %in% dat_active_awd_use$rfa_pa_number) %>%
+#   summarise(count_common_nofo = n_distinct(rfa_pa_number))
+
+# write all files for export together
+
+# # writing files with writexl
+# file_list <- list(
+#   "project_list_nofo_nosi" = dat_active_awd_use_wide,
+#   "project_list_rcdc" = dat_rcdc_wf_use_wide,
+#   "summary_nofo_nosi" = tab01_by_appl_status,
+#   "summary_rcdc" = tab02_by_appl_status_rcdc,
+#   "nofo_nosi_data" = dat_active_awd_use,
+#   "rcdc_data" = dat_rcdc_wf_use,
+#   "nofo_list" = dat_nofo_list
+# )
+# 
+# # Use writexl to write the dataframes to different tabs
+# write_xlsx(file_list, path = here::here("output", "data_results_active_projects.xlsx"))
+
+
+```
+
+
+-   There were `r count_distinct_nofo` selected NOFOs provided in the various list as
+of `r Sys.Date()`. Out of this NOFO list, `r count_terminated_nofo` have
+been terminated so far.
+-   As of `r Sys.Date()`, there are a total of `r n_distinct(dat_rcdc_wf_use_filtered$rfa_pa_number)` NOFOs corresponding to `Workforce Diversity and Outreach` RCDC category.
+
+
+
